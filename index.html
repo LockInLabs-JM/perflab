@@ -485,20 +485,26 @@ async function init() {
   setLoading('INITIALISING');
   updateHeaderDate();
 
-  const stored = localStorage.getItem(CREDS_KEY);
+  // iOS PWA uses isolated localStorage per scope — check both storages
+  let stored = null;
+  try { stored = localStorage.getItem(CREDS_KEY); } catch(e) {}
+  if (!stored) { try { stored = sessionStorage.getItem(CREDS_KEY); } catch(e) {} }
+
   if (stored) {
     try {
       creds = JSON.parse(stored);
+      // Mirror to both storages so whichever context runs next finds it
+      try { localStorage.setItem(CREDS_KEY, stored); } catch(e) {}
+      try { sessionStorage.setItem(CREDS_KEY, stored); } catch(e) {}
       setLoading('LOADING DATA FROM GITHUB');
       const ok = await loadFromGitHub();
-      if (ok) {
-        hideLoading();
-        showApp();
-        return;
-      }
+      if (ok) { hideLoading(); showApp(); return; }
+      // Network failure but we have creds — show app in offline state rather than forcing re-login
+      if (!navigator.onLine) { hideLoading(); showApp(); return; }
     } catch(e) {}
   }
 
+  creds = null;
   hideLoading();
   showLogin();
 }
@@ -538,16 +544,35 @@ async function doLogin() {
 
   creds = { token, user, repo };
 
-  // Try to ensure repo exists
+  // Save creds to BOTH storages immediately — before any async work
+  const credsStr = JSON.stringify(creds);
+  try { localStorage.setItem(CREDS_KEY, credsStr); } catch(e) {}
+  try { sessionStorage.setItem(CREDS_KEY, credsStr); } catch(e) {}
+
+  // Verify token is valid
+  try {
+    const check = await ghFetch('https://api.github.com/user');
+    if (!check.ok) {
+      clearCreds();
+      showLoginError('Token invalid or expired. Make sure "repo" scope is ticked.');
+      return;
+    }
+  } catch(e) {
+    clearCreds();
+    showLoginError('Network error — check your connection.');
+    return;
+  }
+
+  setLoading('CHECKING DATA REPO');
   await ensureRepo();
 
+  setLoading('LOADING DATA');
   const ok = await loadFromGitHub();
   if (!ok) {
-    // New data file — save empty data
+    setLoading('CREATING DATA FILE');
     await saveToGitHub();
   }
 
-  localStorage.setItem(CREDS_KEY, JSON.stringify(creds));
   hideLoading();
   showApp();
 }
@@ -560,26 +585,33 @@ function showLoginError(msg) {
   el.style.display = 'block';
 }
 
+function clearCreds() {
+  creds = null;
+  try { localStorage.removeItem(CREDS_KEY); } catch(e) {}
+  try { sessionStorage.removeItem(CREDS_KEY); } catch(e) {}
+}
+
 async function ensureRepo() {
   // Check if repo exists
-  const check = await ghFetch(`https://api.github.com/repos/${creds.user}/${creds.repo}`, 'GET');
-  if (check.ok) return;
+  const check = await ghFetch(`https://api.github.com/repos/${creds.user}/${creds.repo}`);
+  if (check.ok) return; // already exists, done
 
-  // Create repo
+  // Create WITHOUT auto_init — we'll write data.json as the first file ourselves
+  // auto_init creates a README which causes SHA conflicts when we immediately write data.json
   await ghFetch('https://api.github.com/user/repos', 'POST', {
     name: creds.repo,
     private: true,
     description: 'Performance Lab data — do not edit manually',
-    auto_init: true
+    auto_init: false
   });
 
-  // Small delay for GitHub to initialise
-  await new Promise(r => setTimeout(r, 1500));
+  // Give GitHub a moment to provision the repo
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 function doLogout() {
   showModal('SIGN OUT', 'This will remove your token from this device. Your data stays safe in GitHub.', () => {
-    localStorage.removeItem(CREDS_KEY);
+    clearCreds();
     closeModal();
     location.reload();
   });
@@ -605,18 +637,20 @@ async function loadFromGitHub() {
   try {
     const url = `https://api.github.com/repos/${creds.user}/${creds.repo}/contents/${DATA_FILE}`;
     const res = await ghFetch(url);
-    if (!res.ok) return false;
+    if (!res.ok) { console.warn('loadFromGitHub:', res.status); return false; }
     const json = await res.json();
     fileSha = json.sha;
-    const decoded = JSON.parse(atob(json.content.replace(/\n/g,'')));
+    // Use TextDecoder for safe base64 decode (handles all unicode)
+    const bytes = Uint8Array.from(atob(json.content.replace(/\n/g,'')), c => c.charCodeAt(0));
+    const decoded = JSON.parse(new TextDecoder().decode(bytes));
     data = { weightLog:[], sessionLog:[], lifts:{}, ...decoded };
-    // Restore active session if it was saved mid-session
     if (decoded.activeSession) activeSession = decoded.activeSession;
     lastSyncTime = new Date();
     setSyncStatus('synced');
     updateLastSync();
     return true;
   } catch(e) {
+    console.error('loadFromGitHub error:', e);
     setSyncStatus('error');
     return false;
   }
@@ -629,7 +663,9 @@ async function saveToGitHub() {
     const payload = { ...data };
     if (activeSession) payload.activeSession = activeSession;
 
-    const content = btoa(unescape(encodeURIComponent(JSON.stringify(payload, null, 2))));
+    const jsonStr = JSON.stringify(payload, null, 2);
+    const bytes = new TextEncoder().encode(jsonStr);
+    const content = btoa(String.fromCharCode(...bytes));
     const url = `https://api.github.com/repos/${creds.user}/${creds.repo}/contents/${DATA_FILE}`;
     const body = {
       message: 'Perf Lab sync — ' + new Date().toISOString(),
