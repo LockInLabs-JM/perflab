@@ -550,25 +550,31 @@ async function init() {
   setLoading('INITIALISING');
   updateHeaderDate();
 
-  // iOS PWA uses isolated localStorage per scope — check both storages
+  // iOS PWA uses isolated localStorage — check both storages
   let stored = null;
   try { stored = localStorage.getItem(CREDS_KEY); } catch(e) {}
   if (!stored) { try { stored = sessionStorage.getItem(CREDS_KEY); } catch(e) {} }
 
   if (stored) {
-    try {
-      creds = JSON.parse(stored);
-      // Mirror to both storages so whichever context runs next finds it
+    try { creds = JSON.parse(stored); } catch(e) { creds = null; }
+
+    if (creds && creds.token && creds.user && creds.repo) {
+      // Always mirror to both storages on every launch
       try { localStorage.setItem(CREDS_KEY, stored); } catch(e) {}
       try { sessionStorage.setItem(CREDS_KEY, stored); } catch(e) {}
+
       setLoading('LOADING DATA FROM GITHUB');
       const ok = await loadFromGitHub();
-      if (ok) { hideLoading(); showApp(); return; }
-      // Network failure but we have creds — show app in offline state rather than forcing re-login
-      if (!navigator.onLine) { hideLoading(); showApp(); return; }
-    } catch(e) {}
+
+      // Whether load succeeded or not — if we have valid creds, show the app.
+      // A sync error is shown via the status badge; we never force re-login for it.
+      hideLoading();
+      showApp();
+      return;
+    }
   }
 
+  // No stored creds — show login
   creds = null;
   hideLoading();
   showLogin();
@@ -716,7 +722,9 @@ async function loadFromGitHub() {
     return true;
   } catch(e) {
     console.error('loadFromGitHub error:', e);
-    setSyncStatus('error');
+    if (document.getElementById('mainApp').style.display !== 'none') {
+      setSyncStatus('error');
+    }
     return false;
   }
 }
@@ -730,7 +738,13 @@ async function saveToGitHub() {
 
     const jsonStr = JSON.stringify(payload, null, 2);
     const bytes = new TextEncoder().encode(jsonStr);
-    const content = btoa(String.fromCharCode(...bytes));
+    // Chunked btoa — spread operator crashes on large arrays in iOS WebKit
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    const content = btoa(binary);
     const url = `https://api.github.com/repos/${creds.user}/${creds.repo}/contents/${DATA_FILE}`;
     const body = {
       message: 'Perf Lab sync — ' + new Date().toISOString(),
@@ -739,11 +753,13 @@ async function saveToGitHub() {
     };
     const res = await ghFetch(url, 'PUT', body);
     if (!res.ok) {
-      const err = await res.json();
-      // If conflict (SHA mismatch), reload and retry
-      if (err.message && err.message.includes('sha')) {
-        await loadFromGitHub();
-        await saveToGitHub();
+      let errMsg = res.status;
+      try { const err = await res.json(); errMsg = err.message || errMsg; } catch(e) {}
+      console.error('saveToGitHub HTTP error:', errMsg);
+      // SHA conflict — fetch latest SHA and retry once
+      if (String(errMsg).toLowerCase().includes('sha') || res.status === 409 || res.status === 422) {
+        const refreshed = await loadFromGitHub();
+        if (refreshed) { await saveToGitHub(); }
         return;
       }
       setSyncStatus('error');
