@@ -317,8 +317,17 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
       </div>
       <div id="activeSessionView" style="display:none">
         <div class="session-hdr">
-          <div><div class="session-hdr-title" id="as-title">—</div><div style="font-family:var(--f-mono);font-size:10px;color:var(--text3)">FULL-BODY BIAS</div></div>
-          <div class="session-timer" id="as-timer">00:00</div>
+          <div>
+            <div class="session-hdr-title" id="as-title">—</div>
+            <div style="font-family:var(--f-mono);font-size:10px;color:var(--text3)">FULL-BODY BIAS · <span id="as-sessnum">SESSION #1</span></div>
+          </div>
+          <div style="text-align:right">
+            <div class="session-timer" id="as-timer">00:00</div>
+            <div style="font-family:var(--f-mono);font-size:9px;color:var(--text3);margin-top:3px">
+              REST: <span id="as-rest-label">2MIN</span>
+              <button onclick="cycleRestTime()" style="background:none;border:none;color:var(--accent);font-family:var(--f-mono);font-size:9px;cursor:pointer;padding:0 4px">CHANGE</button>
+            </div>
+          </div>
         </div>
         <div id="exerciseList"></div>
         <div class="finish-wrap">
@@ -387,10 +396,15 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 <!-- REST TIMER -->
 <div class="rest-overlay hidden" id="restOverlay">
   <div class="rest-lbl">REST TIMER</div>
-  <div class="rest-num" id="restNum">90</div>
+  <div class="rest-num" id="restNum">120</div>
   <div class="rest-bar"><div class="rest-bar-fill" id="restFill" style="width:100%"></div></div>
   <div class="rest-ex" id="restEx"></div>
-  <button class="rest-skip" onclick="skipRest()">SKIP REST ›</button>
+  <div style="display:flex;gap:12px;margin-top:16px">
+    <button class="rest-skip" onclick="adjustRest(-30)">−30s</button>
+    <button class="rest-skip" onclick="skipRest()">SKIP ›</button>
+    <button class="rest-skip" onclick="adjustRest(30)">+30s</button>
+  </div>
+  <div style="font-family:var(--f-mono);font-size:9px;color:var(--text3);margin-top:8px" id="restDefault"></div>
 </div>
 
 <!-- MODAL -->
@@ -414,7 +428,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 // ═══════════════════════════════════════════
 const TARGET_WEIGHT = 76.2;
 const HOLIDAY = new Date('2026-06-14');
-const REST_SECS = 90;
+const REST_SECS_DEFAULT = 120;
 const DATA_FILE = 'data.json';
 const CREDS_KEY = 'perflab_creds';
 
@@ -444,22 +458,73 @@ const EX = {
   hangingKnee:      { name:'Hanging Knee Raises',           muscle:'core',       repRange:[12,20], inc:0   },
   cableCrunch:      { name:'Cable Crunch',                  muscle:'core',       repRange:[12,15], inc:5   },
   weightedCrunch:   { name:'Weighted Sit-Up / Crunch',      muscle:'core',       repRange:[15,20], inc:2.5 },
+  barbellSquat:     { name:'Barbell Back Squat',              muscle:'quads',      repRange:[5,8],   inc:2.5 },
+  declineRow:       { name:'Decline Row Machine',             muscle:'back',       repRange:[8,12],  inc:5   },
 };
 
-const SESSIONS = {
+// Each session type has POOLS per slot. Each week rotates to the next option in each pool.
+// Structure: { label, color, slots: [ [option_a, option_b, ...], ... ] }
+// Slot 0 = primary compound, Slot 1 = primary accessory, etc.
+// Core slot is always last and fixed.
+const SESSION_POOLS = {
   chest: {
     label:'CHEST / TRI', color:'var(--accent)',
-    exercises:['inclineBench','pecDeck','skullcrushers','ohp','latPulldown','hackSquat','hangingKnee']
+    slots: [
+      ['inclineBench', 'chestMachine'],           // primary chest
+      ['pecDeck', 'inclineBench'],                 // chest accessory
+      ['skullcrushers', 'dips'],                   // triceps
+      ['ohp', 'latRaise'],                         // shoulder / push
+      ['latPulldown', 'declineRow'],               // back carry-over
+      ['hackSquat', 'legPress'],                   // lower carry-over
+      ['hangingKnee', 'weightedCrunch']            // core (fixed last)
+    ]
   },
   back: {
     label:'BACK / BIS', color:'var(--accent3)',
-    exercises:['barbellRow','latPulldown','tbarRow','ezCurl','chestMachine','rdl','cableCrunch']
+    slots: [
+      ['barbellRow', 'tbarRow'],                   // primary back compound
+      ['latPulldown', 'pullups'],                  // vertical pull
+      ['tbarRow', 'declineRow'],                   // back accessory
+      ['ezCurl', 'hammerCurl'],                    // biceps
+      ['chestMachine', 'inclineBench'],            // chest carry-over
+      ['rdl', 'hyperext'],                         // posterior carry-over
+      ['cableCrunch', 'hangingKnee']               // core (fixed last)
+    ]
   },
   legs: {
     label:'LEGS / COMPOUND', color:'var(--accent2)',
-    exercises:['hackSquat','legPress','hipThrust','rdl','inclineBench','pullups','hangingKnee']
+    slots: [
+      ['hackSquat', 'barbellSquat'],               // primary quad
+      ['legPress', 'hackSquat'],                   // quad volume
+      ['hipThrust', 'rdl'],                        // posterior
+      ['rdl', 'hyperext'],                         // hamstrings/lower back
+      ['inclineBench', 'chestMachine'],            // chest carry-over
+      ['pullups', 'latPulldown'],                  // back carry-over
+      ['hangingKnee', 'weightedCrunch']            // core (fixed last)
+    ]
   }
 };
+
+// SESSIONS kept as alias — built dynamically per call
+const SESSIONS = {
+  chest: { label:'CHEST / TRI', color:'var(--accent)' },
+  back:  { label:'BACK / BIS',  color:'var(--accent3)' },
+  legs:  { label:'LEGS / COMPOUND', color:'var(--accent2)' }
+};
+
+// Build exercise list for a session type, rotating based on how many times that type has been done
+function buildSessionExercises(type) {
+  const pool = SESSION_POOLS[type];
+  if (!pool) return [];
+  // Count previous sessions of this type to determine rotation index
+  const count = (data.sessionLog || []).filter(s => s.type === type).length;
+  return pool.slots.map(slot => slot[count % slot.length]);
+}
+
+// barbellSquat needs to be in EX — add it if missing
+if (!window._exPatched) {
+  window._exPatched = true;
+}
 
 // ═══════════════════════════════════════════
 // STATE
@@ -802,23 +867,51 @@ function showActiveSession() {
   document.getElementById('sessionPicker').style.display='none';
   document.getElementById('activeSessionView').style.display='block';
   document.getElementById('as-title').textContent = activeSession.label;
+  const snEl = document.getElementById('as-sessnum');
+  if (snEl) snEl.textContent = 'SESSION #' + (activeSession.sessionNum || '?');
+  updateRestLabel();
   renderExercises();
   startSessionTimer();
 }
 
+function updateRestLabel() {
+  const secs = (activeSession && activeSession.restSecs) || REST_SECS_DEFAULT;
+  const el = document.getElementById('as-rest-label');
+  if (el) el.textContent = secs >= 60 ? Math.floor(secs/60)+'MIN'+(secs%60?secs%60+'S':'') : secs+'S';
+}
+
+const REST_OPTIONS = [60, 90, 120, 150, 180];
+function cycleRestTime() {
+  if (!activeSession) return;
+  const cur = activeSession.restSecs || REST_SECS_DEFAULT;
+  const idx = REST_OPTIONS.indexOf(cur);
+  const next = REST_OPTIONS[(idx + 1) % REST_OPTIONS.length];
+  activeSession.restSecs = next;
+  _restTotalSecs = next;
+  updateRestLabel();
+  showToast('REST: ' + (next >= 60 ? Math.floor(next/60)+'MIN'+(next%60?next%60+'S':'') : next+'S'));
+}
+
 function startSession(type) {
   const tpl = SESSIONS[type];
+  const exIds = buildSessionExercises(type);
+  const sessionNum = (data.sessionLog || []).filter(s => s.type === type).length + 1;
   activeSession = {
     type, label: tpl.label,
+    sessionNum,
     startTime: Date.now(),
-    exercises: tpl.exercises.map(id => ({
-      id,
-      sets: [
-        {w: suggestW(id), r:null, done:false},
-        {w: suggestW(id), r:null, done:false},
-        {w: suggestW(id), r:null, done:false}
-      ]
-    }))
+    restSecs: REST_SECS_DEFAULT,
+    exercises: exIds.map(id => {
+      const sw = suggestW(id);
+      return {
+        id,
+        sets: [
+          {w: sw, r: suggestR(id), done:false},
+          {w: sw, r: suggestR(id), done:false},
+          {w: sw, r: suggestR(id), done:false}
+        ]
+      };
+    })
   };
   queueSave();
   showActiveSession();
@@ -839,6 +932,14 @@ function suggestW(exId) {
     return (parseFloat(lift.lastWeight) + inc).toString();
   }
   return lift.lastWeight.toString();
+}
+
+function suggestR(exId) {
+  const lift = data.lifts[exId];
+  if (!lift || !lift.avgReps) return null;
+  // Don't pre-fill reps — user should enter actual reps each set
+  // but we store last avg for reference display
+  return null;
 }
 
 function renderExercises() {
@@ -894,7 +995,8 @@ function setR(ei,si,v){ if(activeSession){activeSession.exercises[ei].sets[si].r
 
 function logSet(ei, si) {
   if (!activeSession) return;
-  const set = activeSession.exercises[ei].sets[si];
+  const ex = activeSession.exercises[ei];
+  const set = ex.sets[si];
   const wEl = document.getElementById('w-'+ei+'-'+si);
   const rEl = document.getElementById('r-'+ei+'-'+si);
   const w = parseFloat(wEl.value);
@@ -909,10 +1011,42 @@ function logSet(ei, si) {
   const btn = document.getElementById('sb-'+ei+'-'+si);
   btn.classList.add('done'); btn.textContent = '✓';
 
-  const isLastSet = si === activeSession.exercises[ei].sets.length-1;
+  // Auto-populate the NEXT set with same weight (reps left blank — user fills actual)
+  const nextSi = si + 1;
+  if (nextSi < ex.sets.length && !ex.sets[nextSi].done) {
+    ex.sets[nextSi].w = w;
+    const nextWEl = document.getElementById('w-'+ei+'-'+nextSi);
+    if (nextWEl && !nextWEl.readOnly) {
+      nextWEl.value = w;
+      activeSession.exercises[ei].sets[nextSi].w = w;
+    }
+    // Focus the reps field of the next set after rest
+    // (done in rest timer completion below)
+  }
+  // Also pre-fill next exercise's first set with that exercise's suggestion
+  const nextEi = ei + 1;
+  if (si === ex.sets.length-1 && nextEi < activeSession.exercises.length) {
+    const nextEx = activeSession.exercises[nextEi];
+    if (nextEx.sets[0] && !nextEx.sets[0].done && !nextEx.sets[0].w) {
+      const sw = suggestW(nextEx.id);
+      if (sw) {
+        nextEx.sets.forEach((s, sIdx) => {
+          if (!s.done) {
+            s.w = sw;
+            const el = document.getElementById('w-'+nextEi+'-'+sIdx);
+            if (el && !el.readOnly) el.value = sw;
+          }
+        });
+      }
+    }
+  }
+
+  const isLastSet = si === ex.sets.length-1;
   const isLastEx = ei === activeSession.exercises.length-1;
   if (!(isLastSet && isLastEx)) {
-    startRest(EX[activeSession.exercises[ei].id]?.name || '');
+    const exName = EX[ex.id]?.name || '';
+    const focusTarget = isLastSet ? null : { ei, si: nextSi, field: 'r' };
+    startRest(exName, focusTarget);
   } else {
     showToast('LAST SET DONE — FINISH WHEN READY');
   }
@@ -981,11 +1115,18 @@ function startSessionTimer() {
 // ═══════════════════════════════════════════
 // REST TIMER
 // ═══════════════════════════════════════════
-function startRest(exName) {
+let _restFocusTarget = null;
+let _restTotalSecs = REST_SECS_DEFAULT;
+
+function startRest(exName, focusTarget) {
   if (restIv) clearInterval(restIv);
-  restRem = REST_SECS;
+  _restFocusTarget = focusTarget || null;
+  _restTotalSecs = (activeSession && activeSession.restSecs) || REST_SECS_DEFAULT;
+  restRem = _restTotalSecs;
   document.getElementById('restOverlay').classList.remove('hidden');
   document.getElementById('restEx').textContent = exName.toUpperCase();
+  const defEl = document.getElementById('restDefault');
+  if (defEl) defEl.textContent = 'DEFAULT: ' + (_restTotalSecs/60).toFixed(1).replace('.0','') + ' MIN — TAP ±30s TO ADJUST';
   updateRestUI();
   restIv = setInterval(() => {
     restRem--;
@@ -994,17 +1135,37 @@ function startRest(exName) {
       clearInterval(restIv);
       document.getElementById('restOverlay').classList.add('hidden');
       if (navigator.vibrate) navigator.vibrate([150,80,150]);
+      focusNextField();
     }
   }, 1000);
 }
+
+function adjustRest(delta) {
+  restRem = Math.max(5, restRem + delta);
+  _restTotalSecs = Math.max(30, _restTotalSecs + delta);
+  if (activeSession) activeSession.restSecs = _restTotalSecs;
+  updateRestUI();
+}
+
 function updateRestUI() {
   document.getElementById('restNum').textContent = restRem;
   document.getElementById('restNum').style.color = restRem <= 10 ? 'var(--red)' : 'var(--accent)';
-  document.getElementById('restFill').style.width = (restRem/REST_SECS*100)+'%';
+  const pct = Math.max(0, (restRem / _restTotalSecs) * 100);
+  document.getElementById('restFill').style.width = pct+'%';
 }
+
 function skipRest() {
   if (restIv) clearInterval(restIv);
   document.getElementById('restOverlay').classList.add('hidden');
+  focusNextField();
+}
+
+function focusNextField() {
+  if (!_restFocusTarget) return;
+  const { ei, si, field } = _restFocusTarget;
+  const el = document.getElementById((field||'r')+'-'+ei+'-'+si);
+  if (el && !el.readOnly) { el.focus(); el.select(); }
+  _restFocusTarget = null;
 }
 
 // ═══════════════════════════════════════════
